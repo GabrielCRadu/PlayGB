@@ -4,7 +4,7 @@
 
 ## PlayGB (Optimized Fork)
 
-A Game Boy emulator for the Panic Playdate console, based on [Peanut-GB](https://github.com/deltabeard/Peanut-GB) (a header-only C Game Boy emulator by [deltabeard](https://github.com/deltabeard)) and [minigb_apu](https://github.com/baines/MiniGBS).
+This project is an optimized fork of [PlayGB](https://github.com/risolvipro/PlayGB) (originally created by Matteo D'Ignazio / Risolvi Productions), a Game Boy emulator for the Panic Playdate console based on [Peanut-GB](https://github.com/deltabeard/Peanut-GB) by [deltabeard](https://github.com/deltabeard) and [minigb_apu](https://github.com/baines/MiniGBS).
 
 This fork focuses on architectural refactoring and performance optimizations designed to reduce CPU load:
 - **Direct 4KB Page Table Memory Bus**: Replaces multi-case switch decoding with direct pointer lookups.
