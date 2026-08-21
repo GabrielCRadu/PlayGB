@@ -1,6 +1,6 @@
 name=PlayGB
 author=Radu Gabriel (Original by Risolvi Productions)
-description=A Game Boy emulator for Playdate, based on Peanut-GB. Optimized by Radu Gabriel using Gemini 3.7 Flash & Claude Sonnet 4.6.
+description=An optimized fork of PlayGB (Game Boy emulator for Playdate by Risolvi Productions, based on Peanut-GB). Performance refactor by Radu Gabriel using Gemini 3.7 Flash & Claude Sonnet 4.6.
 bundleID=com.radugabriel.playgb
 version=1.0.0
 buildNumber=10
