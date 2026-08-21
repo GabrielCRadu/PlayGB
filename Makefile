@@ -38,7 +38,8 @@ UINCDIR += minigb_apu
 UINCDIR += lcd
 
 # List all user C define here, like -D_DEBUG=1
-UDEFS = 
+UDEFS = -DENABLE_LCD=1 -DENABLE_SOUND=1 -DPEANUT_GB_HIGH_LCD_ACCURACY=0
+UOPT = -O3 -fomit-frame-pointer 
 
 # Define ASM defines here
 UADEFS = 

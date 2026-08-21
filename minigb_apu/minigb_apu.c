@@ -10,7 +10,15 @@
 #include <string.h>
 
 #include "minigb_apu.h"
-#include "game_scene.h"
+
+typedef struct PGB_GameScene {
+    void *scene;
+    char *save_filename;
+    char *rom_filename;
+    bool needsDisplay;
+    bool audioEnabled;
+    bool audioLocked;
+} PGB_GameScene;
 
 #define DMG_CLOCK_FREQ_U	((unsigned)DMG_CLOCK_FREQ)
 #define AUDIO_NSAMPLES		(AUDIO_SAMPLES * 2u)
@@ -192,6 +200,11 @@ static void update_square(int16_t *left, int16_t *right, const bool ch2, int len
 	if (!c->powered || !c->enabled)
 		return;
 
+	const int16_t gain_l = c->on_left ? vol_l : 0;
+	const int16_t gain_r = c->on_right ? vol_r : 0;
+	if (gain_l == 0 && gain_r == 0 && c->muted)
+		return;
+
     uint32_t freq = DMG_CLOCK_FREQ_U / ((2048 - c->freq) << 5);
 	set_note_freq(c, freq);
 	c->freq_inc *= 8;
@@ -223,11 +236,10 @@ static void update_square(int16_t *left, int16_t *right, const bool ch2, int len
 			continue;
 
 		sample += c->val;
-		sample *= c->volume;
-		sample /= 4;
+		sample = (sample * (int32_t)c->volume) >> 2;
 
-        left[i] += sample * c->on_left * vol_l;
-        right[i] += sample * c->on_right * vol_r;
+		if (gain_l) left[i] += sample * gain_l;
+		if (gain_r) right[i] += sample * gain_r;
 	}
 }
 
@@ -249,6 +261,11 @@ static void update_wave(int16_t *left, int16_t *right, int len)
 	struct chan *c = chans + 2;
 
 	if (!c->powered || !c->enabled)
+		return;
+
+	const int16_t gain_l = c->on_left ? vol_l : 0;
+	const int16_t gain_r = c->on_right ? vol_r : 0;
+	if (gain_l == 0 && gain_r == 0 && c->muted)
 		return;
 
     uint32_t freq = (DMG_CLOCK_FREQ_U / 64) / (2048 - c->freq);
@@ -281,18 +298,17 @@ static void update_wave(int16_t *left, int16_t *right, int len)
 			continue;
 
 		{
-			/* First element is unused. */
-            static const int16_t div[] = { INT16_MAX, 1, 2, 4 };
-			sample = sample / (div[c->volume]);
+			static const uint8_t shift[] = { 0, 0, 1, 2 };
+			sample >>= shift[c->volume & 3];
 		}
 
 		if (c->muted)
 			continue;
 
-		sample /= 4;
+		sample >>= 2;
 
-        left[i] += sample * c->on_left * vol_l;
-        right[i] += sample * c->on_right * vol_r;
+		if (gain_l) left[i] += sample * gain_l;
+		if (gain_r) right[i] += sample * gain_r;
 	}
 }
 
@@ -301,6 +317,11 @@ static void update_noise(int16_t *left, int16_t *right, int len)
 	struct chan *c = chans + 3;
 
 	if (!c->powered)
+		return;
+
+	const int16_t gain_l = c->on_left ? vol_l : 0;
+	const int16_t gain_r = c->on_right ? vol_r : 0;
+	if (gain_l == 0 && gain_r == 0 && c->muted)
 		return;
 
 	{
@@ -352,11 +373,10 @@ static void update_noise(int16_t *left, int16_t *right, int len)
 			continue;
 
 		sample += c->val;
-		sample *= c->volume;
-		sample /= 4;
+		sample = (sample * (int32_t)c->volume) >> 2;
 
-		left[i] += sample * c->on_left * vol_l;
-		right[i] += sample * c->on_right * vol_r;
+		if (gain_l) left[i] += sample * gain_l;
+		if (gain_r) right[i] += sample * gain_r;
 	}
 }
 

@@ -340,6 +340,9 @@ static uint8_t gb_back_fb[LCD_HEIGHT][LCD_WIDTH];
  */
 struct gb_s
 {
+    const uint8_t *read_pages[16];
+    uint8_t *write_pages[16];
+
     uint8_t *gb_rom;
     uint8_t *gb_cart_ram;
 
@@ -534,186 +537,208 @@ void gb_set_rtc(struct gb_s *gb, const struct tm * const time)
 /**
  * Internal function used to read bytes.
  */
-uint8_t __gb_read(struct gb_s *gb, const uint_fast16_t addr)
+static inline void __gb_update_rom_bank(struct gb_s *gb)
 {
-	switch(addr >> 12)
-	{
-	case 0x0:
+	uint16_t bank = gb->selected_rom_bank;
+	if(gb->mbc == 1 && gb->cart_mode_select)
+		bank = gb->selected_rom_bank & 0x1F;
+	const uint8_t *bank_ptr = gb->gb_rom + ((uint32_t)bank * ROM_BANK_SIZE);
+	gb->read_pages[4] = bank_ptr + 0x0000;
+	gb->read_pages[5] = bank_ptr + 0x1000;
+	gb->read_pages[6] = bank_ptr + 0x2000;
+	gb->read_pages[7] = bank_ptr + 0x3000;
+}
 
-	/* TODO: BIOS support. */
-	case 0x1:
-	case 0x2:
-	case 0x3:
+static inline void __gb_update_ram_bank(struct gb_s *gb)
+{
+	if(gb->cart_ram && gb->enable_cart_ram && gb->gb_cart_ram)
+	{
+		if(gb->mbc == 3 && gb->cart_ram_bank >= 0x08)
+		{
+			gb->read_pages[10] = NULL;
+			gb->read_pages[11] = NULL;
+			gb->write_pages[10] = NULL;
+			gb->write_pages[11] = NULL;
+		}
+		else
+		{
+			uint8_t ram_bank = 0;
+			if((gb->cart_mode_select || gb->mbc != 1) && gb->cart_ram_bank < gb->num_ram_banks)
+				ram_bank = gb->cart_ram_bank;
+			uint8_t *ram_ptr = gb->gb_cart_ram + ((uint32_t)ram_bank * CRAM_BANK_SIZE);
+			gb->read_pages[10] = ram_ptr + 0x0000;
+			gb->read_pages[11] = ram_ptr + 0x1000;
+			gb->write_pages[10] = ram_ptr + 0x0000;
+			gb->write_pages[11] = ram_ptr + 0x1000;
+		}
+	}
+	else
+	{
+		gb->read_pages[10] = NULL;
+		gb->read_pages[11] = NULL;
+		gb->write_pages[10] = NULL;
+		gb->write_pages[11] = NULL;
+	}
+}
+
+/**
+ * Fallback function used to read bytes from IO, HRAM, OAM, or unmapped RAM.
+ */
+static uint8_t __gb_read_special(struct gb_s *gb, const uint_fast16_t addr)
+{
+	if(addr < 0x8000)
 		return gb->gb_rom[addr];
 
-	case 0x4:
-	case 0x5:
-	case 0x6:
-	case 0x7:
-            if(gb->mbc == 1 && gb->cart_mode_select)
-                return gb->gb_rom[addr + ((gb->selected_rom_bank & 0x1F) - 1) * ROM_BANK_SIZE];
-            else
-                return gb->gb_rom[addr + (gb->selected_rom_bank - 1) * ROM_BANK_SIZE];
-            
-
-	case 0x8:
-	case 0x9:
-		return gb->vram[addr - VRAM_ADDR];
-
-	case 0xA:
-	case 0xB:
+	if(addr >= 0xA000 && addr <= 0xBFFF)
+	{
 		if(gb->cart_ram && gb->enable_cart_ram)
 		{
 			if(gb->mbc == 3 && gb->cart_ram_bank >= 0x08)
 				return gb->cart_rtc[gb->cart_ram_bank - 0x08];
 			else if((gb->cart_mode_select || gb->mbc != 1) &&
-					gb->cart_ram_bank < gb->num_ram_banks)
+					gb->cart_ram_bank < gb->num_ram_banks && gb->gb_cart_ram)
 			{
 				return gb->gb_cart_ram[addr - CART_RAM_ADDR +
 							    (gb->cart_ram_bank * CRAM_BANK_SIZE)];
 			}
-			else
+			else if(gb->gb_cart_ram)
 				return gb->gb_cart_ram[addr - CART_RAM_ADDR];
 		}
-
 		return 0xFF;
-
-	case 0xC:
-		return gb->wram[addr - WRAM_0_ADDR];
-
-	case 0xD:
-		return gb->wram[addr - WRAM_0_ADDR];
-
-	case 0xE:
-		return gb->wram[addr - ECHO_ADDR];
-
-	case 0xF:
-		if(addr < OAM_ADDR)
-			return gb->wram[addr - ECHO_ADDR];
-
-		if(addr < UNUSED_ADDR)
-			return gb->oam[addr - OAM_ADDR];
-
-		/* Unusable memory area. Reading from this area returns 0.*/
-		if(addr < IO_ADDR)
-			return 0xFF;
-
-		/* HRAM */
-		if(HRAM_ADDR <= addr && addr < INTR_EN_ADDR)
-			return gb->hram[addr - IO_ADDR];
-
-		/* APU registers. */
-		if((addr >= 0xFF10) && (addr <= 0xFF3F))
-		{
-            if(gb->direct.sound)
-            {
-                return audio_read(addr);
-            }
-            else
-            {
-                static const uint8_t ortab[] = {
-                    0x80, 0x3f, 0x00, 0xff, 0xbf,
-                    0xff, 0x3f, 0x00, 0xff, 0xbf,
-                    0x7f, 0xff, 0x9f, 0xff, 0xbf,
-                    0xff, 0xff, 0x00, 0x00, 0xbf,
-                    0x00, 0x00, 0x70,
-                    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-                };
-                return gb->hram[addr - IO_ADDR] | ortab[addr - IO_ADDR];
-            }
-		}
-            
-		/* IO and Interrupts. */
-		switch(addr & 0xFF)
-		{
-		/* IO Registers */
-		case 0x00:
-			return 0xC0 | gb->gb_reg.P1;
-
-		case 0x01:
-			return gb->gb_reg.SB;
-
-		case 0x02:
-			return gb->gb_reg.SC;
-
-		/* Timer Registers */
-		case 0x04:
-			return gb->gb_reg.DIV;
-
-		case 0x05:
-			return gb->gb_reg.TIMA;
-
-		case 0x06:
-			return gb->gb_reg.TMA;
-
-		case 0x07:
-			return gb->gb_reg.TAC;
-
-		/* Interrupt Flag Register */
-		case 0x0F:
-			return gb->gb_reg.IF;
-
-		/* LCD Registers */
-		case 0x40:
-			return gb->gb_reg.LCDC;
-
-		case 0x41:
-			return (gb->gb_reg.STAT & STAT_USER_BITS) |
-			       (gb->gb_reg.LCDC & LCDC_ENABLE ? gb->lcd_mode : LCD_VBLANK);
-
-		case 0x42:
-			return gb->gb_reg.SCY;
-
-		case 0x43:
-			return gb->gb_reg.SCX;
-
-		case 0x44:
-			return gb->gb_reg.LY;
-
-		case 0x45:
-			return gb->gb_reg.LYC;
-
-		/* DMA Register */
-		case 0x46:
-			return gb->gb_reg.DMA;
-
-		/* DMG Palette Registers */
-		case 0x47:
-			return gb->gb_reg.BGP;
-
-		case 0x48:
-			return gb->gb_reg.OBP0;
-
-		case 0x49:
-			return gb->gb_reg.OBP1;
-
-		/* Window Position Registers */
-		case 0x4A:
-			return gb->gb_reg.WY;
-
-		case 0x4B:
-			return gb->gb_reg.WX;
-
-		/* Interrupt Enable Register */
-		case 0xFF:
-			return gb->gb_reg.IE;
-
-		/* Unused registers return 1 */
-		default:
-			return 0xFF;
-		}
 	}
 
-	(gb->gb_error)(gb, GB_INVALID_READ, addr);
-	return 0xFF;
+	if(addr < OAM_ADDR)
+		return gb->wram[addr - ECHO_ADDR];
+
+	if(addr < UNUSED_ADDR)
+		return gb->oam[addr - OAM_ADDR];
+
+	if(addr < IO_ADDR)
+		return 0xFF;
+
+	/* HRAM */
+	if(HRAM_ADDR <= addr && addr < INTR_EN_ADDR)
+		return gb->hram[addr - IO_ADDR];
+
+	/* APU registers. */
+	if((addr >= 0xFF10) && (addr <= 0xFF3F))
+	{
+		if(gb->direct.sound)
+		{
+			return audio_read(addr);
+		}
+		else
+		{
+			static const uint8_t ortab[] = {
+				0x80, 0x3f, 0x00, 0xff, 0xbf,
+				0xff, 0x3f, 0x00, 0xff, 0xbf,
+				0x7f, 0xff, 0x9f, 0xff, 0xbf,
+				0xff, 0xff, 0x00, 0x00, 0xbf,
+				0x00, 0x00, 0x70,
+				0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+			};
+			return gb->hram[addr - IO_ADDR] | ortab[addr - IO_ADDR];
+		}
+	}
+		
+	/* IO and Interrupts. */
+	switch(addr & 0xFF)
+	{
+	/* IO Registers */
+	case 0x00:
+		return 0xC0 | gb->gb_reg.P1;
+
+	case 0x01:
+		return gb->gb_reg.SB;
+
+	case 0x02:
+		return gb->gb_reg.SC;
+
+	/* Timer Registers */
+	case 0x04:
+		return gb->gb_reg.DIV;
+
+	case 0x05:
+		return gb->gb_reg.TIMA;
+
+	case 0x06:
+		return gb->gb_reg.TMA;
+
+	case 0x07:
+		return gb->gb_reg.TAC;
+
+	/* Interrupt Flag Register */
+	case 0x0F:
+		return gb->gb_reg.IF;
+
+	/* LCD Registers */
+	case 0x40:
+		return gb->gb_reg.LCDC;
+
+	case 0x41:
+		return (gb->gb_reg.STAT & STAT_USER_BITS) |
+		       (gb->gb_reg.LCDC & LCDC_ENABLE ? gb->lcd_mode : LCD_VBLANK);
+
+	case 0x42:
+		return gb->gb_reg.SCY;
+
+	case 0x43:
+		return gb->gb_reg.SCX;
+
+	case 0x44:
+		return gb->gb_reg.LY;
+
+	case 0x45:
+		return gb->gb_reg.LYC;
+
+	/* DMA Register */
+	case 0x46:
+		return gb->gb_reg.DMA;
+
+	/* DMG Palette Registers */
+	case 0x47:
+		return gb->gb_reg.BGP;
+
+	case 0x48:
+		return gb->gb_reg.OBP0;
+
+	case 0x49:
+		return gb->gb_reg.OBP1;
+
+	/* Window Position Registers */
+	case 0x4A:
+		return gb->gb_reg.WY;
+
+	case 0x4B:
+		return gb->gb_reg.WX;
+
+	/* Interrupt Enable Register */
+	case 0xFF:
+		return gb->gb_reg.IE;
+
+	/* Unused registers return 1 */
+	default:
+		return 0xFF;
+	}
 }
 
 /**
- * Internal function used to write bytes.
+ * Fast internal inline function used to read bytes.
  */
-void __gb_write(struct gb_s *gb, const uint_fast16_t addr, const uint8_t val)
+static inline uint8_t __gb_read(struct gb_s *gb, const uint_fast16_t addr)
+{
+	const uint8_t *page = gb->read_pages[addr >> 12];
+	if(page != NULL)
+		return page[addr & 0x0FFF];
+	return __gb_read_special(gb, addr);
+}
+
+/**
+ * Fallback function used to write bytes to registers, banking controllers, etc.
+ */
+static void __gb_write_special(struct gb_s *gb, const uint_fast16_t addr, const uint8_t val)
 {
 	switch(addr >> 12)
 	{
@@ -722,16 +747,18 @@ void __gb_write(struct gb_s *gb, const uint_fast16_t addr, const uint8_t val)
 		if(gb->mbc == 2 && addr & 0x10)
 			return;
 		else if(gb->mbc > 0 && gb->cart_ram)
+		{
 			gb->enable_cart_ram = ((val & 0x0F) == 0x0A);
-
+			__gb_update_ram_bank(gb);
+		}
 		return;
 
 	case 0x2:
 		if(gb->mbc == 5)
 		{
 			gb->selected_rom_bank = (gb->selected_rom_bank & 0x100) | val;
-			gb->selected_rom_bank =
-				gb->selected_rom_bank & gb->num_rom_banks_mask;
+			gb->selected_rom_bank = gb->selected_rom_bank & gb->num_rom_banks_mask;
+			__gb_update_rom_bank(gb);
 			return;
 		}
 
@@ -740,29 +767,26 @@ void __gb_write(struct gb_s *gb, const uint_fast16_t addr, const uint8_t val)
 	case 0x3:
 		if(gb->mbc == 1)
 		{
-			//selected_rom_bank = val & 0x7;
 			gb->selected_rom_bank = (val & 0x1F) | (gb->selected_rom_bank & 0x60);
-
 			if((gb->selected_rom_bank & 0x1F) == 0x00)
 				gb->selected_rom_bank++;
 		}
 		else if(gb->mbc == 2 && addr & 0x10)
 		{
 			gb->selected_rom_bank = val & 0x0F;
-
 			if(!gb->selected_rom_bank)
 				gb->selected_rom_bank++;
 		}
 		else if(gb->mbc == 3)
 		{
 			gb->selected_rom_bank = val & 0x7F;
-
 			if(!gb->selected_rom_bank)
 				gb->selected_rom_bank++;
 		}
 		else if(gb->mbc == 5)
 			gb->selected_rom_bank = (val & 0x01) << 8 | (gb->selected_rom_bank & 0xFF);
 		gb->selected_rom_bank = gb->selected_rom_bank & gb->num_rom_banks_mask;
+		__gb_update_rom_bank(gb);
 		return;
 
 	case 0x4:
@@ -772,17 +796,26 @@ void __gb_write(struct gb_s *gb, const uint_fast16_t addr, const uint8_t val)
 			gb->cart_ram_bank = (val & 3);
 			gb->selected_rom_bank = ((val & 3) << 5) | (gb->selected_rom_bank & 0x1F);
 			gb->selected_rom_bank = gb->selected_rom_bank & gb->num_rom_banks_mask;
+			__gb_update_rom_bank(gb);
+			__gb_update_ram_bank(gb);
 		}
 		else if(gb->mbc == 3)
+		{
 			gb->cart_ram_bank = val;
+			__gb_update_ram_bank(gb);
+		}
 		else if(gb->mbc == 5)
+		{
 			gb->cart_ram_bank = (val & 0x0F);
-
+			__gb_update_ram_bank(gb);
+		}
 		return;
 
 	case 0x6:
 	case 0x7:
 		gb->cart_mode_select = (val & 1);
+		__gb_update_rom_bank(gb);
+		__gb_update_ram_bank(gb);
 		return;
 
 	case 0x8:
@@ -797,14 +830,13 @@ void __gb_write(struct gb_s *gb, const uint_fast16_t addr, const uint8_t val)
 			if(gb->mbc == 3 && gb->cart_ram_bank >= 0x08)
 				gb->cart_rtc[gb->cart_ram_bank - 0x08] = val;
 			else if(gb->cart_mode_select &&
-					gb->cart_ram_bank < gb->num_ram_banks)
+					gb->cart_ram_bank < gb->num_ram_banks && gb->gb_cart_ram)
 			{
 				gb->gb_cart_ram[addr - CART_RAM_ADDR + (gb->cart_ram_bank * CRAM_BANK_SIZE)] = val;
 			}
-			else if(gb->num_ram_banks)
+			else if(gb->num_ram_banks && gb->gb_cart_ram)
 				gb->gb_cart_ram[addr - CART_RAM_ADDR] = val;
 		}
-
 		return;
 
 	case 0xC:
@@ -844,12 +876,12 @@ void __gb_write(struct gb_s *gb, const uint_fast16_t addr, const uint8_t val)
 
 		if((addr >= 0xFF10) && (addr <= 0xFF3F))
 		{
-            if(gb->direct.sound){
-                audio_write(addr, val);
-            }
-            else {
-                gb->hram[addr - IO_ADDR] = val;
-            }
+			if(gb->direct.sound){
+				audio_write(addr, val);
+			}
+			else {
+				gb->hram[addr - IO_ADDR] = val;
+			}
 			return;
 		}
 
@@ -858,18 +890,11 @@ void __gb_write(struct gb_s *gb, const uint_fast16_t addr, const uint8_t val)
 		{
 		/* Joypad */
 		case 0x00:
-			/* Only bits 5 and 4 are R/W.
-			 * The lower bits are overwritten later, and the two most
-			 * significant bits are unused. */
 			gb->gb_reg.P1 = val;
-
-			/* Direction keys selected */
 			if((gb->gb_reg.P1 & 0b010000) == 0)
 				gb->gb_reg.P1 |= (gb->direct.joypad >> 4);
-			/* Button keys selected */
 			else
 				gb->gb_reg.P1 |= (gb->direct.joypad & 0x0F);
-
 			return;
 
 		/* Serial */
@@ -914,11 +939,8 @@ void __gb_write(struct gb_s *gb, const uint_fast16_t addr, const uint8_t val)
 
 			gb->gb_reg.LCDC = val;
 
-			/* LY fixed to 0 when LCD turned off. */
 			if((gb->gb_reg.LCDC & LCDC_ENABLE) == 0)
 			{
-				/* Do not turn off LCD outside of VBLANK. This may
-				 * happen due to poor timing in this emulator. */
 				if(gb->lcd_mode != LCD_VBLANK)
 				{
 					gb->gb_reg.LCDC |= LCDC_ENABLE;
@@ -929,7 +951,6 @@ void __gb_write(struct gb_s *gb, const uint_fast16_t addr, const uint8_t val)
 				gb->gb_reg.LY = 0;
 				gb->counter.lcd_count = 0;
 			}
-
 			return;
 
 		case 0x41:
@@ -944,7 +965,6 @@ void __gb_write(struct gb_s *gb, const uint_fast16_t addr, const uint8_t val)
 			gb->gb_reg.SCX = val;
 			return;
 
-		/* LY (0xFF44) is read only. */
 		case 0x45:
 			gb->gb_reg.LYC = val;
 			return;
@@ -952,10 +972,8 @@ void __gb_write(struct gb_s *gb, const uint_fast16_t addr, const uint8_t val)
 		/* DMA Register */
 		case 0x46:
 			gb->gb_reg.DMA = (val % 0xF1);
-
 			for(uint8_t i = 0; i < OAM_SIZE; i++)
 				gb->oam[i] = __gb_read(gb, (gb->gb_reg.DMA << 8) + i);
-
 			return;
 
 		/* DMG Palette Registers */
@@ -1007,7 +1025,21 @@ void __gb_write(struct gb_s *gb, const uint_fast16_t addr, const uint8_t val)
 	(gb->gb_error)(gb, GB_INVALID_WRITE, addr);
 }
 
-uint8_t __gb_execute_cb(struct gb_s *gb)
+/**
+ * Fast internal inline function used to write bytes.
+ */
+static inline void __gb_write(struct gb_s *gb, const uint_fast16_t addr, const uint8_t val)
+{
+	uint8_t *page = gb->write_pages[addr >> 12];
+	if(page != NULL)
+	{
+		page[addr & 0x0FFF] = val;
+		return;
+	}
+	__gb_write_special(gb, addr, val);
+}
+
+static inline uint8_t __gb_execute_cb(struct gb_s *gb)
 {
 	uint8_t inst_cycles;
 	uint8_t cbop = __gb_read(gb, gb->cpu_reg.pc++);
@@ -1227,140 +1259,91 @@ void __gb_draw_line(struct gb_s *gb)
     /* If background is enabled, draw it. */
 	if(gb->gb_reg.LCDC & LCDC_BG_ENABLE)
 	{
-		/* Calculate current background line to draw. Constant because
-		 * this function draws only this one line each time it is
-		 * called. */
 		const uint8_t bg_y = gb->gb_reg.LY + gb->gb_reg.SCY;
-
-		/* Get selected background map address for first tile
-		 * corresponding to current line.
-		 * 0x20 (32) is the width of a background tile, and the bit
-		 * shift is to calculate the address. */
-		const uint16_t bg_map =
-			((gb->gb_reg.LCDC & LCDC_BG_MAP) ?
-			 VRAM_BMAP_2 : VRAM_BMAP_1)
-			+ (bg_y >> 3) * 0x20;
-
-		/* The displays (what the player sees) X coordinate, drawn right
-		 * to left. */
-		uint8_t disp_x = LCD_WIDTH - 1;
-
-		/* The X coordinate to begin drawing the background at. */
-		uint8_t bg_x = disp_x + gb->gb_reg.SCX;
-
-		/* Get tile index for current background tile. */
-		uint8_t idx = gb->vram[bg_map + (bg_x >> 3)];
-		/* Y coordinate of tile pixel to draw. */
+		const uint16_t bg_map = ((gb->gb_reg.LCDC & LCDC_BG_MAP) ? VRAM_BMAP_2 : VRAM_BMAP_1) + (bg_y >> 3) * 0x20;
 		const uint8_t py = (bg_y & 0x07);
-		/* X coordinate of tile pixel to draw. */
-		uint8_t px = 7 - (bg_x & 0x07);
 
-		uint16_t tile;
+		int disp_x = 0;
+		uint8_t bg_x = gb->gb_reg.SCX;
+		uint8_t fine_x = bg_x & 7;
+		uint8_t tile_col = (bg_x >> 3) & 31;
 
-		/* Select addressing mode. */
-		if(gb->gb_reg.LCDC & LCDC_TILE_SELECT)
-			tile = VRAM_TILES_1 + idx * 0x10;
-		else
-			tile = VRAM_TILES_2 + ((idx + 0x80) % 0x100) * 0x10;
-
-		tile += 2 * py;
-
-		/* fetch first tile */
-		uint8_t t1 = gb->vram[tile] >> px;
-		uint8_t t2 = gb->vram[tile + 1] >> px;
-
-		for(; disp_x != 0xFF; disp_x--)
+		while(disp_x < LCD_WIDTH)
 		{
-			if(px == 8)
+			uint8_t idx = gb->vram[bg_map + tile_col];
+			uint16_t tile;
+			if(gb->gb_reg.LCDC & LCDC_TILE_SELECT)
+				tile = VRAM_TILES_1 + idx * 0x10;
+			else
+				tile = VRAM_TILES_2 + ((idx + 0x80) % 0x100) * 0x10;
+			tile += 2 * py;
+
+			uint8_t t1 = gb->vram[tile];
+			uint8_t t2 = gb->vram[tile + 1];
+
+			int pixels_to_draw = 8 - fine_x;
+			if(disp_x + pixels_to_draw > LCD_WIDTH)
+				pixels_to_draw = LCD_WIDTH - disp_x;
+
+			for(int i = fine_x; i < fine_x + pixels_to_draw; i++)
 			{
-				/* fetch next tile */
-				px = 0;
-				bg_x = disp_x + gb->gb_reg.SCX;
-				idx = gb->vram[bg_map + (bg_x >> 3)];
-
-				if(gb->gb_reg.LCDC & LCDC_TILE_SELECT)
-					tile = VRAM_TILES_1 + idx * 0x10;
-				else
-					tile = VRAM_TILES_2 + ((idx + 0x80) % 0x100) * 0x10;
-
-				tile += 2 * py;
-				t1 = gb->vram[tile];
-				t2 = gb->vram[tile + 1];
+				int shift = 7 - i;
+				uint8_t c = ((t1 >> shift) & 1) | (((t2 >> shift) & 1) << 1);
+				pixels[disp_x++] = (gb->display.bg_palette[c] | LCD_PALETTE_BG);
 			}
 
-			/* copy background */
-			uint8_t c = (t1 & 0x1) | ((t2 & 0x1) << 1);
-            pixels[disp_x] = (gb->display.bg_palette[c] | LCD_PALETTE_BG);
-            
-			t1 >>= 1;
-			t2 >>= 1;
-			px++;
+			tile_col = (tile_col + 1) & 31;
+			fine_x = 0;
 		}
 	}
     
 	/* draw window */
-	if(gb->gb_reg.LCDC & LCDC_WINDOW_ENABLE
+	if((gb->gb_reg.LCDC & LCDC_WINDOW_ENABLE)
 			&& gb->gb_reg.LY >= gb->display.WY
 			&& gb->gb_reg.WX <= 166)
 	{
-		/* Calculate Window Map Address. */
-		uint16_t win_line = (gb->gb_reg.LCDC & LCDC_WINDOW_MAP) ?
-				    VRAM_BMAP_2 : VRAM_BMAP_1;
-		win_line += (gb->display.window_clear >> 3) * 0x20;
-
-		uint8_t disp_x = LCD_WIDTH - 1;
-		uint8_t win_x = disp_x - gb->gb_reg.WX + 7;
-
-		// look up tile
-		uint8_t py = gb->display.window_clear & 0x07;
-		uint8_t px = 7 - (win_x & 0x07);
-		uint8_t idx = gb->vram[win_line + (win_x >> 3)];
-
-		uint16_t tile;
-
-		if(gb->gb_reg.LCDC & LCDC_TILE_SELECT)
-			tile = VRAM_TILES_1 + idx * 0x10;
-		else
-			tile = VRAM_TILES_2 + ((idx + 0x80) % 0x100) * 0x10;
-
-		tile += 2 * py;
-
-		// fetch first tile
-		uint8_t t1 = gb->vram[tile] >> px;
-		uint8_t t2 = gb->vram[tile + 1] >> px;
-
-		// loop & copy window
-		uint8_t end = (gb->gb_reg.WX < 7 ? 0 : gb->gb_reg.WX - 7) - 1;
-
-		for(; disp_x != end; disp_x--)
+		int win_start_x = (int)gb->gb_reg.WX - 7;
+		if(win_start_x < 0) win_start_x = 0;
+		if(win_start_x < LCD_WIDTH)
 		{
-			if(px == 8)
-			{
-				// fetch next tile
-				px = 0;
-				win_x = disp_x - gb->gb_reg.WX + 7;
-				idx = gb->vram[win_line + (win_x >> 3)];
+			uint16_t win_map = ((gb->gb_reg.LCDC & LCDC_WINDOW_MAP) ? VRAM_BMAP_2 : VRAM_BMAP_1)
+							+ (gb->display.window_clear >> 3) * 0x20;
+			uint8_t py = gb->display.window_clear & 0x07;
+			int disp_x = win_start_x;
+			int win_x = (gb->gb_reg.WX < 7) ? (7 - gb->gb_reg.WX) : 0;
+			uint8_t fine_x = win_x & 7;
+			uint8_t tile_col = (win_x >> 3) & 31;
 
+			while(disp_x < LCD_WIDTH)
+			{
+				uint8_t idx = gb->vram[win_map + tile_col];
+				uint16_t tile;
 				if(gb->gb_reg.LCDC & LCDC_TILE_SELECT)
 					tile = VRAM_TILES_1 + idx * 0x10;
 				else
 					tile = VRAM_TILES_2 + ((idx + 0x80) % 0x100) * 0x10;
-                
 				tile += 2 * py;
-				t1 = gb->vram[tile];
-				t2 = gb->vram[tile + 1];
+
+				uint8_t t1 = gb->vram[tile];
+				uint8_t t2 = gb->vram[tile + 1];
+
+				int pixels_to_draw = 8 - fine_x;
+				if(disp_x + pixels_to_draw > LCD_WIDTH)
+					pixels_to_draw = LCD_WIDTH - disp_x;
+
+				for(int i = fine_x; i < fine_x + pixels_to_draw; i++)
+				{
+					int shift = 7 - i;
+					uint8_t c = ((t1 >> shift) & 1) | (((t2 >> shift) & 1) << 1);
+					pixels[disp_x++] = (gb->display.bg_palette[c] | LCD_PALETTE_BG);
+				}
+
+				tile_col = (tile_col + 1) & 31;
+				fine_x = 0;
 			}
 
-			// copy window
-			uint8_t c = (t1 & 0x1) | ((t2 & 0x1) << 1);
-            pixels[disp_x] = (gb->display.bg_palette[c] | LCD_PALETTE_BG);
-            
-			t1 >>= 1;
-			t2 >>= 1;
-			px++;
+			gb->display.window_clear++;
 		}
-
-		gb->display.window_clear++; // advance window line
 	}
 
 	// draw sprites
@@ -1402,6 +1385,12 @@ void __gb_draw_line(struct gb_s *gb)
 			number_of_sprites = MAX_SPRITES_LINE;
 #endif
 
+#if !PEANUT_GB_HIGH_LCD_ACCURACY
+		const uint8_t obj_size_offset = (gb->gb_reg.LCDC & LCDC_OBJ_SIZE) ? 0 : 8;
+		const uint8_t ly_bound = gb->gb_reg.LY + obj_size_offset;
+		const uint8_t ly_plus_16 = gb->gb_reg.LY + 16;
+#endif
+
 		/* Render each sprite, from low priority to high priority. */
 #if PEANUT_GB_HIGH_LCD_ACCURACY
 		/* Render the top ten prioritised sprites on this scanline. */
@@ -1420,20 +1409,19 @@ void __gb_draw_line(struct gb_s *gb)
             
 			/* Sprite Y position. */
 			uint8_t OY = gb->oam[s_4];
+
+#if !PEANUT_GB_HIGH_LCD_ACCURACY
+			/* If sprite isn't on this line, continue. */
+			if(ly_bound >= OY || ly_plus_16 < OY)
+				continue;
+#endif
+
             /* Sprite X position. */
             uint8_t OX = gb->oam[s_4 + 1];
             /* Sprite Tile/Pattern Number. */
             uint8_t OT = gb->oam[s_4 + 2] & (gb->gb_reg.LCDC & LCDC_OBJ_SIZE ? 0xFE : 0xFF);
             /* Additional attributes. */
             uint8_t OF = gb->oam[s_4 + 3];
-            
-#if !PEANUT_GB_HIGH_LCD_ACCURACY
-			/* If sprite isn't on this line, continue. */
-			if(gb->gb_reg.LY +
-					(gb->gb_reg.LCDC & LCDC_OBJ_SIZE ? 0 : 8) >= OY ||
-					gb->gb_reg.LY + 16 < OY)
-				continue;
-#endif
             
 			/* Continue if sprite not visible. */
             if(OX == 0 || OX >= 168)
@@ -3534,14 +3522,14 @@ void __gb_step_cpu(struct gb_s *gb)
         /* DIV register timing */
         gb->counter.div_count += inst_cycles;
         
-        if(gb->counter.div_count >= DIV_CYCLES)
+        if(__builtin_expect(gb->counter.div_count >= DIV_CYCLES, 0))
         {
             gb->gb_reg.DIV++;
             gb->counter.div_count -= DIV_CYCLES;
         }
         
         /* Check serial transmission. */
-        if(gb->gb_reg.SC & SERIAL_SC_TX_START)
+        if(__builtin_expect((gb->gb_reg.SC & SERIAL_SC_TX_START) != 0, 0))
         {
             /* If new transfer, call TX function. */
             if(gb->counter.serial_count == 0 && gb->gb_serial_tx != NULL)
@@ -3552,9 +3540,6 @@ void __gb_step_cpu(struct gb_s *gb)
             /* If it's time to receive byte, call RX function. */
             if(gb->counter.serial_count >= SERIAL_CYCLES)
             {
-                /* If RX can be done, do it. */
-                /* If RX failed, do not change SB if using external
-                 * clock, or set to 0xFF if using internal clock. */
                 uint8_t rx;
                 
                 if(gb->gb_serial_rx != NULL &&
@@ -3562,27 +3547,14 @@ void __gb_step_cpu(struct gb_s *gb)
                     GB_SERIAL_RX_SUCCESS))
                 {
                     gb->gb_reg.SB = rx;
-                    
-                    /* Inform game of serial TX/RX completion. */
                     gb->gb_reg.SC &= 0x01;
                     gb->gb_reg.IF |= SERIAL_INTR;
                 }
                 else if(gb->gb_reg.SC & SERIAL_SC_CLOCK_SRC)
                 {
-                    /* If using internal clock, and console is not
-                     * attached to any external peripheral, shifted
-                     * bits are replaced with logic 1. */
                     gb->gb_reg.SB = 0xFF;
-                    
-                    /* Inform game of serial TX/RX completion. */
                     gb->gb_reg.SC &= 0x01;
                     gb->gb_reg.IF |= SERIAL_INTR;
-                }
-                else
-                {
-                    /* If using external clock, and console is not
-                     * attached to any external peripheral, bits are
-                     * not shifted, so SB is not modified. */
                 }
                 
                 gb->counter.serial_count = 0;
@@ -3590,7 +3562,6 @@ void __gb_step_cpu(struct gb_s *gb)
         }
                 
         /* TIMA register timing */
-        /* TODO: Change tac_enable to struct of TAC timer control bits. */
         if(gb->gb_reg.tac_enable)
         {
             static const uint_fast16_t TAC_CYCLES[4] = {1024, 16, 64, 256};
@@ -3599,22 +3570,23 @@ void __gb_step_cpu(struct gb_s *gb)
             
             uint_fast16_t tac_cycle = TAC_CYCLES[gb->gb_reg.tac_rate];
             
-            while(gb->counter.tima_count >= tac_cycle)
+            if(__builtin_expect(gb->counter.tima_count >= tac_cycle, 0))
             {
-                gb->counter.tima_count -= tac_cycle;
-                
-                if(++gb->gb_reg.TIMA == 0)
+                while(gb->counter.tima_count >= tac_cycle)
                 {
-                    gb->gb_reg.IF |= TIMER_INTR;
-                    /* On overflow, set TMA to TIMA. */
-                    gb->gb_reg.TIMA = gb->gb_reg.TMA;
+                    gb->counter.tima_count -= tac_cycle;
+                    
+                    if(++gb->gb_reg.TIMA == 0)
+                    {
+                        gb->gb_reg.IF |= TIMER_INTR;
+                        gb->gb_reg.TIMA = gb->gb_reg.TMA;
+                    }
                 }
             }
         }
         
-        /* TODO Check behaviour of LCD during LCD power off state. */
         /* If LCD is off, don't update LCD state. */
-        if((gb->gb_reg.LCDC & LCDC_ENABLE) == 0)
+        if(__builtin_expect((gb->gb_reg.LCDC & LCDC_ENABLE) == 0, 0))
             return;
         
         /* LCD Timing */
@@ -3772,6 +3744,36 @@ void gb_reset(struct gb_s *gb)
 	gb->cart_ram_bank = 0;
 	gb->enable_cart_ram = 0;
 	gb->cart_mode_select = 0;
+
+	/* Setup direct memory page table mappings (0x0000 - 0xFFFF) */
+	gb->read_pages[0] = gb->gb_rom + 0x0000;
+	gb->read_pages[1] = gb->gb_rom + 0x1000;
+	gb->read_pages[2] = gb->gb_rom + 0x2000;
+	gb->read_pages[3] = gb->gb_rom + 0x3000;
+
+	__gb_update_rom_bank(gb);
+
+	gb->read_pages[8] = gb->vram + 0x0000;
+	gb->read_pages[9] = gb->vram + 0x1000;
+	gb->write_pages[8] = gb->vram + 0x0000;
+	gb->write_pages[9] = gb->vram + 0x1000;
+
+	__gb_update_ram_bank(gb);
+
+	gb->read_pages[12] = gb->wram + 0x0000;
+	gb->read_pages[13] = gb->wram + 0x1000;
+	gb->write_pages[12] = gb->wram + 0x0000;
+	gb->write_pages[13] = gb->wram + 0x1000;
+
+	gb->read_pages[14] = gb->wram + 0x0000;
+	gb->write_pages[14] = gb->wram + 0x0000;
+
+	gb->read_pages[15] = NULL;
+	gb->write_pages[15] = NULL;
+
+	for(int i = 0; i < 8; i++) {
+		gb->write_pages[i] = NULL;
+	}
 
 	/* Initialise CPU registers as though a DMG. */
 	gb->cpu_reg.af = 0x01B0;

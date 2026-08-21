@@ -14,6 +14,7 @@
 
 typedef struct {
     unsigned int length;
+    unsigned int capacity;
     void** items;
 } PGB_Array;
 

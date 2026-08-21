@@ -1,7 +1,7 @@
 name=PlayGB
-author=Risolvi Productions
-description=A Game Boy emulator based on Peanut-GB
-bundleID=com.risolvipro.playgb
-version=0.8.2
+author=Radu Gabriel (Original by Risolvi Productions)
+description=A Game Boy emulator for Playdate, based on Peanut-GB. Optimized by Radu Gabriel using Gemini 3.7 Flash & Claude Sonnet 4.6.
+bundleID=com.radugabriel.playgb
+version=1.0.0
 buildNumber=10
 imagePath=launcher

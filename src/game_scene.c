@@ -41,6 +41,7 @@ static const char *startButtonText = "start";
 static const char *selectButtonText = "select";
 
 static uint8_t PGB_bitmask[4][4][4];
+static uint8_t PGB_dither_lut[4][256];
 static bool PGB_GameScene_bitmask_done = false;
 
 PGB_GameScene* PGB_GameScene_new(const char *rom_filename)
@@ -345,8 +346,18 @@ static void gb_error(struct gb_s *gb, const enum gb_error_e gb_err, const uint16
         
         PGB_Scene_refreshMenu(context->scene->scene);
     }
+}
 
-    return;
+static inline bool pgb_line_changed(const uint8_t *p1, const uint8_t *p2)
+{
+    const uint32_t *a = (const uint32_t*)p1;
+    const uint32_t *b = (const uint32_t*)p2;
+    for(int i = 0; i < 40; i++)
+    {
+        if(a[i] != b[i])
+            return true;
+    }
+    return false;
 }
 
 static void PGB_GameScene_update(void *object)
@@ -355,34 +366,40 @@ static void PGB_GameScene_update(void *object)
     
     PGB_Scene_update(gameScene->scene);
             
-    float progress = 0.5f;
+    int toggleRange = gameScene->selector.height - gameScene->selector.toggleSize;
+    int toggleY = toggleRange / 2;
     
     gameScene->selector.startPressed = false;
     gameScene->selector.selectPressed = false;
     
     if(!playdate->system->isCrankDocked())
     {
-        float angle = fmaxf(0, fminf(360, playdate->system->getCrankAngle()));
+        int angle = (int)playdate->system->getCrankAngle();
+        if(angle < 0) angle = 0;
+        if(angle > 360) angle = 360;
         
-        if(angle <= (180 - gameScene->selector.deadAngle))
+        int dead = gameScene->selector.deadAngle;
+        int trig = gameScene->selector.triggerAngle;
+        
+        if(angle <= (180 - dead))
         {
-            if(angle >= gameScene->selector.triggerAngle)
+            if(angle >= trig)
             {
                 gameScene->selector.startPressed = true;
             }
             
-            float adjustedAngle = fminf(angle, gameScene->selector.triggerAngle);
-            progress = 0.5f - adjustedAngle / gameScene->selector.triggerAngle * 0.5f;
+            int adj = angle < trig ? angle : trig;
+            toggleY = (toggleRange / 2) - (adj * toggleRange) / (2 * trig);
         }
-        else if(angle >= (180 + gameScene->selector.deadAngle))
+        else if(angle >= (180 + dead))
         {
-            if(angle <= (360 - gameScene->selector.triggerAngle))
+            if(angle <= (360 - trig))
             {
                 gameScene->selector.selectPressed = true;
             }
             
-            float adjustedAngle = fminf(360 - angle, gameScene->selector.triggerAngle);
-            progress = 0.5f + adjustedAngle / gameScene->selector.triggerAngle * 0.5f;
+            int adj = (360 - angle) < trig ? (360 - angle) : trig;
+            toggleY = (toggleRange / 2) + (adj * toggleRange) / (2 * trig);
         }
         else {
             gameScene->selector.startPressed = true;
@@ -390,7 +407,7 @@ static void PGB_GameScene_update(void *object)
         }
     }
     
-    gameScene->selector.toggleY = roundf((gameScene->selector.height - gameScene->selector.toggleSize) * progress);
+    gameScene->selector.toggleY = toggleY;
     
     bool needsDisplay = false;
     
@@ -439,12 +456,7 @@ static void PGB_GameScene_update(void *object)
         memset(gameScene->debug_updatedRows, 0, LCD_ROWS);
         #endif
         
-        struct gb_s gb;
-        memcpy(&gb, &context->gb, sizeof(struct gb_s));
-        
-        gb_run_frame(&gb);
-        
-        memcpy(&context->gb, &gb, sizeof(struct gb_s));
+        gb_run_frame(&context->gb);
         
         bool gb_draw = (!context->gb.direct.frame_skip || !context->gb.display.frame_skip_count || needsDisplay);
         
@@ -484,8 +496,8 @@ static void PGB_GameScene_update(void *object)
                     single_line = false;
                 }
                 
-                uint8_t *pixels;
-                uint8_t *old_pixels;
+                const uint8_t *pixels;
+                const uint8_t *old_pixels;
                 
                 if(context->gb.display.back_fb_enabled)
                 {
@@ -498,39 +510,45 @@ static void PGB_GameScene_update(void *object)
                     old_pixels = gb_front_fb[y];
                 }
                 
-                if(memcmp(pixels, old_pixels, LCD_WIDTH) != 0)
+                if(needsDisplay || pgb_line_changed(pixels, old_pixels))
                 {
                     int d_row1 = y2 & 3;
                     int d_row2 = (y2 + 1) & 3;
                     
-                    int fb_index1 = lcd_rows;
-                    int fb_index2 = lcd_rows + row_offset;
-                    
-                    memset(&framebuffer[fb_index1], 0x00, PGB_LCD_ROWSIZE);
+                    uint32_t *dst1_32 = (uint32_t*)&framebuffer[lcd_rows];
+                    uint32_t *dst2_32 = (uint32_t*)&framebuffer[lcd_rows + row_offset];
+
+                    const uint8_t *lut1 = PGB_dither_lut[d_row1];
+                    const uint8_t *lut2 = PGB_dither_lut[d_row2];
+
                     if(y_offset == 2)
                     {
-                        memset(&framebuffer[fb_index2], 0x00, PGB_LCD_ROWSIZE);
-                    }
-                    
-                    uint8_t bit = 0;
-                    
-                    for(int x = 0; x < LCD_WIDTH; x++)
-                    {
-                        uint8_t pixel = pixels[x] & 3;
-                        
-                        framebuffer[fb_index1] |= PGB_bitmask[pixel][bit][d_row1];
-                        if(y_offset == 2)
+                        for(int x = 0; x < LCD_WIDTH; x += 16)
                         {
-                            framebuffer[fb_index2] |= PGB_bitmask[pixel][bit][d_row2];
+                            uint8_t q0 = (pixels[x] & 3) | ((pixels[x+1] & 3) << 2) | ((pixels[x+2] & 3) << 4) | ((pixels[x+3] & 3) << 6);
+                            uint8_t q1 = (pixels[x+4] & 3) | ((pixels[x+5] & 3) << 2) | ((pixels[x+6] & 3) << 4) | ((pixels[x+7] & 3) << 6);
+                            uint8_t q2 = (pixels[x+8] & 3) | ((pixels[x+9] & 3) << 2) | ((pixels[x+10] & 3) << 4) | ((pixels[x+11] & 3) << 6);
+                            uint8_t q3 = (pixels[x+12] & 3) | ((pixels[x+13] & 3) << 2) | ((pixels[x+14] & 3) << 4) | ((pixels[x+15] & 3) << 6);
+
+                            uint32_t w1 = (uint32_t)lut1[q0] | ((uint32_t)lut1[q1] << 8) | ((uint32_t)lut1[q2] << 16) | ((uint32_t)lut1[q3] << 24);
+                            uint32_t w2 = (uint32_t)lut2[q0] | ((uint32_t)lut2[q1] << 8) | ((uint32_t)lut2[q2] << 16) | ((uint32_t)lut2[q3] << 24);
+
+                            *dst1_32++ = w1;
+                            *dst2_32++ = w2;
                         }
-                        
-                        bit++;
-                        
-                        if(bit == 4)
+                    }
+                    else
+                    {
+                        for(int x = 0; x < LCD_WIDTH; x += 16)
                         {
-                            bit = 0;
-                            fb_index1++;
-                            fb_index2++;
+                            uint8_t q0 = (pixels[x] & 3) | ((pixels[x+1] & 3) << 2) | ((pixels[x+2] & 3) << 4) | ((pixels[x+3] & 3) << 6);
+                            uint8_t q1 = (pixels[x+4] & 3) | ((pixels[x+5] & 3) << 2) | ((pixels[x+6] & 3) << 4) | ((pixels[x+7] & 3) << 6);
+                            uint8_t q2 = (pixels[x+8] & 3) | ((pixels[x+9] & 3) << 2) | ((pixels[x+10] & 3) << 4) | ((pixels[x+11] & 3) << 6);
+                            uint8_t q3 = (pixels[x+12] & 3) | ((pixels[x+13] & 3) << 2) | ((pixels[x+14] & 3) << 4) | ((pixels[x+15] & 3) << 6);
+
+                            uint32_t w1 = (uint32_t)lut1[q0] | ((uint32_t)lut1[q1] << 8) | ((uint32_t)lut1[q2] << 16) | ((uint32_t)lut1[q3] << 24);
+
+                            *dst1_32++ = w1;
                         }
                     }
                     
@@ -764,6 +782,28 @@ static void PGB_GameScene_generateBitmask(void)
                     x_offset = 0;
                 }
             }
+        }
+    }
+
+    for(int row = 0; row < 4; row++)
+    {
+        for(int idx = 0; idx < 256; idx++)
+        {
+            uint8_t p0 = idx & 3;
+            uint8_t p1 = (idx >> 2) & 3;
+            uint8_t p2 = (idx >> 4) & 3;
+            uint8_t p3 = (idx >> 6) & 3;
+
+            uint8_t b7 = PGB_patterns[p0][row][0] << 7;
+            uint8_t b6 = PGB_patterns[p0][row][1] << 6;
+            uint8_t b5 = PGB_patterns[p1][row][2] << 5;
+            uint8_t b4 = PGB_patterns[p1][row][3] << 4;
+            uint8_t b3 = PGB_patterns[p2][row][0] << 3;
+            uint8_t b2 = PGB_patterns[p2][row][1] << 2;
+            uint8_t b1 = PGB_patterns[p3][row][2] << 1;
+            uint8_t b0 = PGB_patterns[p3][row][3] << 0;
+
+            PGB_dither_lut[row][idx] = (uint8_t)(b7 | b6 | b5 | b4 | b3 | b2 | b1 | b0);
         }
     }
 }

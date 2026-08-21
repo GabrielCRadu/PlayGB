@@ -1,7 +1,13 @@
 *.xcodeproj
 *.pdx
+*.exe
+*.o
+*.dll
 /build/
 /Source/pdex.bin
 /Source/pdex.dylib
 /Source/pdex.elf
 /Source/pdex.so
+gb_roms/
+*.gb
+*.gbc

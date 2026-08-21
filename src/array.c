@@ -11,6 +11,7 @@ PGB_Array* array_new(void)
 {
     PGB_Array *array = pgb_malloc(sizeof(PGB_Array));
     array->length = 0;
+    array->capacity = 0;
     array->items = NULL;
 
     return array;
@@ -18,14 +19,23 @@ PGB_Array* array_new(void)
 
 void array_push(PGB_Array *array, void *item)
 {
-    array->length++;
-    array->items = pgb_realloc(array->items, array->length * sizeof(item));
-    array->items[array->length - 1] = item;
+    if (array->length >= array->capacity)
+    {
+        unsigned int new_cap = array->capacity == 0 ? 8 : (array->capacity * 2);
+        void **new_items = pgb_realloc(array->items, new_cap * sizeof(void*));
+        if (new_items)
+        {
+            array->items = new_items;
+            array->capacity = new_cap;
+        }
+    }
+    array->items[array->length++] = item;
 }
 
 void array_clear(PGB_Array *array)
 {
     array->length = 0;
+    array->capacity = 0;
     pgb_free(array->items);
     array->items = NULL;
 }
